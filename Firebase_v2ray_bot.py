@@ -18,7 +18,8 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # Telegram Bot Library (python-telegram-bot v20+)
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+# --- (FIXED) 'Message' import එක මෙතැනට එකතු කරන ලදී ---
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, Message
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -98,6 +99,10 @@ STRINGS = {
     'joined_button': {
         'en': "✅ Joined",
         'si': "✅ සම්බන්ධ වුනා",
+    },
+    'checking_button': {
+        'en': "Checking...",
+        'si': "පරීක්ෂා කරමින්...",
     },
     'force_register': {
         'en': "Thanks for joining! 🙏\n\nNow, you need to register to get your referral link and access the bot.\n\nPlease use the command: `/register`",
@@ -365,11 +370,15 @@ def user_checks(func):
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 disable_web_page_preview=True
             )
+            if update.callback_query:
+                await update.callback_query.answer() # Button එකට loading අයින් කරයි
             return
 
         # 2. Registration Check
         if not user_data.get('is_registered', False):
             await message.reply_text(get_string('force_register', lang))
+            if update.callback_query:
+                await update.callback_query.answer() # Button එකට loading අයින් කරයි
             return
 
         # Checks Pass
@@ -576,8 +585,11 @@ async def show_bot_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, lang
     
     text = get_string('bot_menu_title', lang)
     
-    message = update.message or update.callback_query.message
-    
+    message = update.message or (update.callback_query and update.callback_query.message)
+    if not message:
+         logger.warning("show_bot_menu: 'message' object එකක් සොයාගත නොහැක.")
+         return
+
     if edit_message_id:
         # පවතින message එක edit කරයි (e.g., check_join පසු)
         try:
@@ -641,7 +653,7 @@ async def myaccount_command(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     user_id = user_data['id']
     
     bot_username = (await context.bot.get_me()).username
-    ref_link = f"https://t.me/{bot_username}?start={user_id}"
+    ref_link = f"https{':'}//t.me/{bot_username}?start={user_id}"
     
     text = get_string('my_account', lang).format(
         coins=user_data.get('coins', 0),
@@ -1081,6 +1093,8 @@ def main():
         post_id_finder
     ))
     
+    # --- Error Handler ---
+    # application.add_error_handler(error_handler) # (අවශ්‍ය නම් පසුව එකතු කළ හැක)
 
     # Bot Run
     logger.info("Bot is starting to poll...")
