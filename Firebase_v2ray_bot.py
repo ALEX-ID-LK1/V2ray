@@ -269,7 +269,10 @@ async def language_button_handler(update: Update, context: ContextTypes.DEFAULT_
         
     await query.answer()
     
-    user = query.effective_user
+    # --- (FIXED) User ලබාගන්නා ක්‍රමය වෙනස් කරන ලදී ---
+    user = query.from_user 
+    # -----------------------------------------------
+    
     if not user: return
 
     lang_code = query.data.split('_')[1] # 'en' or 'si'
@@ -470,7 +473,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await query.answer()
     
-    user = query.effective_user
+    # --- (FIXED) User ලබාගන්නා ක්‍රමය වෙනස් කරන ලදී ---
+    user = query.from_user
+    # -----------------------------------------------
+    
     if not user: return
         
     data = query.data
@@ -723,3 +729,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
