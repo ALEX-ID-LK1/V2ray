@@ -11,7 +11,12 @@ FreeV2ray Telegram Bot (Firebase + Multi-Language Edition)
 import logging
 import asyncio
 from functools import wraps
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+# --- (FIXED) ParseMode import එක මෙතැනට වෙනස් කරන ලදී ---
+from telegram.constants import ParseMode 
+# --------------------------------------------------
+
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, MessageHandler, 
     filters, CallbackQueryHandler
@@ -718,4 +723,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
