@@ -1,731 +1,1002 @@
-# -*- coding: utf-8 -*-
+උ# -*- coding: utf-8 -*-
 
 """
-FreeV2ray Telegram Bot (Firebase + Multi-Language Edition)
+FreeV2ray Telegram Bot - Firebase Edition (Multi-Language + Support)
 
-මෙම bot ක්‍රියාත්මක වීමට පෙර:
-1.  `pip install python-telegram-bot firebase-admin` install කරන්න.
-2.  ඔබගේ Firebase `serviceAccountKey.json` file එක මෙම file එක ඇති තැනම තබන්න.
+This bot manages V2ray subscriptions, referrals (coins), and provides support.
+It uses Firebase Firestore as a persistent database.
+It requires a 'serviceAccountKey.json' file in the same directory.
 """
 
 import logging
 import asyncio
-from functools import wraps
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-
-# --- (FIXED) ParseMode import එක මෙතැනට වෙනස් කරන ලදී ---
-from telegram.constants import ParseMode 
-# --------------------------------------------------
-
-from telegram.ext import (
-    Application, CommandHandler, ContextTypes, MessageHandler, 
-    filters, CallbackQueryHandler
-)
-from telegram.error import Forbidden, BadRequest
+import re
+from datetime import datetime
 
 # Firebase Admin SDK
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud.firestore_v1.base_query import FieldFilter
 
-# --- CONFIGURATION (කරුණාකර මෙය නිවැරදිව පුරවන්න) ---
+# Telegram Bot Library (python-telegram-bot v20+)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+    ConversationHandler,
+)
+# --- (FIXED) ParseMode import එක මෙතැනට වෙනස් කරන ලදී ---
+from telegram.constants import ParseMode
+# --------------------------------------------------
+
+
+# --- Bot Settings (කරුණාකර මෙය සකසන්න) ---
 BOT_TOKEN = "7015662481:AAGYK7Buir3TIezH38jpeeQ4mvQydY7tI_g"
 OWNER_ID = 6687619682
 MAIN_CHANNEL_ID = -1003209750658
-CHANNEL_INVITE_LINK = "https://t.me/freev2rayx"
-REFERRAL_COIN_VALUE = 20
-BROADCAST_BATCH_SIZE = 25
+MAIN_CHANNEL_USERNAME = "@freev2rayx" # @ දාන්න (e.g., @mychannel)
+CHANNEL_INVITE_LINK = "https://t.me/freev2rayx" # Invite link (public or private)
 
-# --- (NEW) Multi-Language Strings (භාෂා ගබඩාව) ---
-STRINGS = {
-    'en': {
-        'select_language': "👋 Welcome! Please select your language:",
-        'please_join': "**🛑 Stop!**\n\nTo use this bot, you must first join our main channel.\n\nJoin the channel, then click /start again.",
-        'welcome_not_registered': "Welcome {first_name}! 🇱🇰\n\nTo get your referral link and use all bot services (Shop, Free V2ray), please register first.\n\n👉 Type /register to register.",
-        'welcome_registered': "Welcome back, {first_name}! 🇱🇰\n\n💰 **Your Coin Balance:** {coins} Coins\n\n**Available Commands:**\n🛒 /shop - Buy premium packages.\n🎁 /free - Get the daily free V2ray config.\n📊 /myaccount - View your account and referral link.",
-        'err_not_registered': "🔒 **You are not registered!**\n\nTo use this feature, please type /register first.",
-        'register_success': "✅ **Registration Successful!**\n\nYou can now use /shop and /free.\n\n🔗 **Your Referral Link:**\n`{link}`\n\nShare this link and earn **{value} Coins** for each referral!",
-        'register_already': "✅ You are already registered!\n\nUse /myaccount to get your referral link.",
-        'referral_notify': "🎉 Congratulations! {user_name} registered using your link.\nYou received **{value} Coins**!\n\n💰 **Your new Coin Balance:** {new_balance} Coins",
-        'my_account': "**📊 My Account**\n\n📈 **Total Referrals:** {ref_count}\n💰 **Coin Balance:** {coins} Coins\n\n🔗 **Your Referral Link:**\n`{link}`\n\nType /shop to buy V2ray packages.",
-        'shop_title': "🛒 **FreeV2ray Shop** 🛒\n\nYour Coin Balance: {coins} Coins\n\nChoose a package to buy using your coins:",
-        'free_no_config': "😕 **Sorry!**\n\nThe owner has not set a free V2ray config for today yet.\nPlease check back later.",
-        'free_success_followup': "🚀 **Enjoy your free V2ray!** 🚀\n\nThis is a free config, so speed and stability might be limited.\n\nFor an uninterrupted, high-speed premium server, check out our packages!\n👉 Type /shop **to see prices!**\n👉 Type /myaccount **to earn more coins!**",
-        'err_admin_post_deleted': "⛔ **Error!**\nThe post set by the owner was deleted from the channel. Please inform the admin.",
-        'err_generic': "⛔ An error occurred! Please try again later. (Error: {e})",
-        'buy_success': "✅ **Purchase Successful!**\n\nYou bought '{package_name}'.\nYour new Coin Balance: {new_balance} Coins\n\nThe Owner (Admin) will contact you shortly. 🇱🇰",
-        'buy_fail_coins': "⚠️ **Insufficient Coins!**\n\nTo buy '{package_name}', you need {price} Coins.\nYou only have {balance} Coins.\n\nShare your referral link to earn more!",
-        'buy_err_tx': "⛔ Transaction error! Please try again.",
-        'buy_err_no_package': "⛔ Error! This package is no longer available."
-    },
-    'si': {
-        'select_language': "👋 ආයුබෝවන්! කරුණාකර ඔබගේ භාෂාව තෝරන්න:",
-        'please_join': "**🛑 නවතින්න!**\n\nබොට් භාවිතා කිරීමට, කරුණාකර පළමුව අපගේ ප්‍රධාන නාලිකාවට (Main Channel) සම්බන්ධ වන්න.\n\nChannel එකට Join වූ පසු, නැවත /start ඔබන්න.",
-        'welcome_not_registered': "ආයුබෝවන් {first_name}! 🇱🇰\n\nBot ගේ සියලුම සේවාවන් (Shop, Free V2ray) ලබා ගැනීමට සහ ඔබගේ referral link එක ලබා ගැනීමට, කරුණාකර පළමුව ලියාපදිංචි වන්න.\n\n👉 ලියාපදිංචි වීමට /register ලෙස type කරන්න.",
-        'welcome_registered': "ආයුබෝවන් {first_name}, නැවතත් සාදරයෙන් පිළිගනිමු! 🇱🇰\n\n💰 **ඔබගේ Coin Balance:** {coins} Coins\n\n**ඔබට දැන් භාවිතා කළ හැක:**\n🛒 /shop - Premium packages මිලදී ගන්න.\n🎁 /free - දවසේ නොමිලේ V2ray config එක ලබා ගන්න.\n📊 /myaccount - ඔබගේ ගිණුම සහ referral link එක බලන්න.",
-        'err_not_registered': "🔒 **ඔබ තවම ලියාපදිංචි වී නැත!**\n\nමෙම සේවාව භාවිතා කිරීමට, කරුණාකර පළමුව /register ලෙස type කර ලියාපදිංචි වන්න.",
-        'register_success': "✅ **ලියාපදිංචිය සාර්ථකයි!**\n\nඔබට දැන් /shop සහ /free commands භාවිතා කළ හැක.\n\n🔗 **ඔබගේ Referral Link එක:**\n`{link}`\n\nමෙම link එක share කර එක් referral කෙනෙකු සඳහා **Coin {value}** ක් ලබා ගන්න!",
-        'register_already': "✅ ඔබ දැනටමත් ලියාපදිංචි වී ඇත!\n\n/myaccount මගින් ඔබගේ referral link එක ලබා ගන්න.",
-        'referral_notify': "🎉 සුභ පැතුම්! {user_name} ඔබගේ link එක හරහා ලියාපදිංචි විය.\nඔබට **Coin {value}** ක් ලැබුණි!\n\n💰 **ඔබගේ නව Coin Balance:** {new_balance} Coins",
-        'my_account': "**📊 ඔබගේ ගිණුම (My Account)**\n\n📈 **මුළු Referral ගණන:** {ref_count}\n💰 **Coin Balance:** {coins} Coins\n\n🔗 **ඔබගේ Referral Link එක:**\n`{link}`\n\nV2ray packages මිලදී ගැනීමට /shop ලෙස type කරන්න.",
-        'shop_title': "🛒 **FreeV2ray Shop** 🛒\n\nඔබගේ Coin Balance: {coins} Coins\n\nඔබගේ Coin භාවිතා කර කැමති package එකක් තෝරන්න:",
-        'free_no_config': "😕 **සමාවන්න!**\n\nOwner විසින් තවමත් අද දින නොමිලේ V2ray config එකක් ඇතුලත් කර නැත.\nකරුණාකර මද වේලාවකින් නැවත උත්සාහ කරන්න.",
-        'free_success_followup': "🚀 **Enjoy your free V2ray!** 🚀\n\nමෙය නොමිලේ දෙන config එකක් නිසා වේගය සහ ස්ථාවරත්වය අඩු විය හැක.\n\nතදබදයක් නැති, අධි වේගී Premium server එකක් සඳහා, අපගේ Premium packages බලන්න.\n👉 /shop **ටයිප් කර මිල ගණන් බලන්න!**\n👉 /myaccount **මගින් coin එකතු කරගන්න!**",
-        'err_admin_post_deleted': "⛔ **දෝෂයක්!**\nOwner විසින් set කළ post එක channel එකෙන් delete කර ඇත. කරුණාකර Admin ට දන්වන්න.",
-        'err_generic': "⛔ යම් දෝෂයක් සිදුවිය. කරුණාකර මද වේලාවකින් උත්සාහ කරන්න. (Error: {e})",
-        'buy_success': "✅ **මිලදී ගැනීම සාර්ථකයි!**\n\nඔබ '{package_name}' මිලදී ගත්තා.\nඔබගේ නව Coin Balance: {new_balance} Coins\n\nOwner (Admin) විසින් ඔබව කෙටි වේලාවකින් සම්බන්ධ කරගනු ඇත. 🇱🇰",
-        'buy_fail_coins': "⚠️ **Coin මදි! (Insufficient Coins)**\n\n'{package_name}' මිලදී ගැනීමට Coin {price} ක් අවශ්‍ය වේ.\nඔබ සතුව ඇත්තේ Coin {balance} ක් පමණි.\n\nReferral link එක share කර තවත් Coin එකතු කරගන්න!",
-        'buy_err_tx': "⛔ ගනුදෙනුවේ දෝෂයක්! කරුණාකර නැවත උත්සාහ කරන්න.",
-        'buy_err_no_package': "⛔ දෝෂයක්! මෙම Package එක තවදුරටත් වලංගු නැත."
-    }
-}
+# Referral Settings
+COINS_PER_REFERRAL = 20
+MIN_REFERRALS_FOR_PREMIUM = 5 # (දැන් මෙය භාවිතා නොවේ, නමුත් අනාගතයට තไว้)
 
-# --- Shop Packages (මෙය නොවෙනස්ව පවතී) ---
-PRODUCTS = {
-    "30d_50gb": {"name": "30 Day - 50GB", "price": 100},
-    "30d_100gb": {"name": "30 Day - 100GB", "price": 200},
-    "30d_unlimited": {"name": "30 Day - Unlimited", "price": 300},
-    "50d_50gb": {"name": "50 Day - 50GB", "price": 200},
-    "50d_100gb": {"name": "50 Day - 100GB", "price": 300},
-    "50d_unlimited": {"name": "50 Day - Unlimited", "price": 400},
-}
+# Broadcast Settings
+BROADCAST_BATCH_SIZE = 25  # එක සැරේකට යවන ගණන
+BROADCAST_SLEEP_TIME = 1   # batch අතර තත්පර ගණන
 
-# --- Logging (දෝෂ පරීක්ෂාව සඳහා) ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# --- Firebase Initialization (Firebase ආරම්භ කිරීම) ---
+# --- Firebase Setup ---
 try:
-    # Render වැනි platform වලදී, serviceAccountKey.json file එක
-    # .gitignore කර ඇති නිසා, එය පරිසර විචල්‍යයකින් (Env Variable)
-    # හෝ "Secret File" එකකින් පැමිණිය යුතුය.
-    # මෙම කේතය file එකක් ලෙස එය බලාපොරොත්තු වේ.
     cred = credentials.Certificate("serviceAccountKey.json")
     firebase_admin.initialize_app(cred)
     db = firestore.client()
-    logger.info("Firebase සාර්ථකව සම්බන්ධ කරන ලදී!")
+    logging.info("Firebase Firestore සාර්ථකව සම්බන්ධ විය.")
 except FileNotFoundError:
-    logger.critical("FATAL ERROR: `serviceAccountKey.json` file එක හමු නොවීය!")
-    logger.critical("කරුණාකර Render/VPS වෙත Secret File එකක් ලෙස මෙය upload කරන්න.")
-    # Render/VPS මත deploy කරන විට, bot එක crash වීම වැලැක්වීමට
-    # මෙතැනින් exit() කිරීම සමහරවිට අවශ්‍ය නොවනු ඇත, 
-    # නමුත් file එක නොමැතිව bot ක්‍රියා නොකරයි.
-    # Deployment පරිසරය අනුව මෙය සකස් කළ යුතුය.
-    # දැනට, file එක නැත්නම් bot එක නතර වේ.
-    exit(1) # නතර කිරීම
+    logging.error("!!! 'serviceAccountKey.json' file එක හමු නොවීය! !!!")
+    logging.error("කරුණාකර key file එක, bot script එක ඇති folder එකේම තබන්න.")
+    exit()
+except ValueError as e:
+    if "Could not deserialize key data" in str(e):
+        logging.error("!!! 'serviceAccountKey.json' file එකේ අන්තර්ගතය වැරදියි! (Invalid JSON) !!!")
+        logging.error("කරුණාකර Firebase වලින් අලුත් key file එකක් download කර paste කරන්න.")
+        exit()
+    else:
+        logging.error(f"Firebase සම්බන්ධ වීමේ දෝෂයක්: {e}")
+        exit()
 except Exception as e:
-    logger.critical(f"Firebase සම්බන්ධ කිරීමේ දෝෂයක්: {e}")
-    exit(1) # නතර කිරීම
+    logging.error(f"Firebase ආරම්භ කිරීමේදී නොදන්නා දෝෂයක්: {e}")
+    exit()
 
-# --- (NEW) Helper Function: Get String ---
-def get_string(lang_code: str, key: str) -> str:
-    """
-    භාෂාවට අදාළව නියමිත string එක ලබා දෙයි.
-    'si' (Sinhala) යනු default භාෂාවයි.
-    """
-    if lang_code not in STRINGS:
-        lang_code = 'si' # Default to Sinhala
-    
-    return STRINGS.get(lang_code, {}).get(key, f"STR_ERR: {key}")
+# Firestore Collections References
+users_ref = db.collection("users")
+admin_ref = db.collection("admin_settings")
 
-# --- Firestore Helper Functions ---
+# Conversation States (Support Feature සඳහා)
+TYPING_SUPPORT_MESSAGE = 1
 
-async def get_user_doc(user_id: int, first_name: str = "User", username: str = "") -> firestore.DocumentSnapshot:
-    """
-    User කෙනෙක් Firestore එකෙන් ලබා ගනී.
-    ඔහු/ඇය නොමැති නම්, නව document එකක් සාදයි.
-    (NEW) 'language' field එක එකතු කර ඇත.
-    """
-    user_id_str = str(user_id)
-    doc_ref = db.collection('users').document(user_id_str)
-    doc = await doc_ref.get()
-    
-    if not doc.exists:
-        user_data = {
-            "user_id": user_id,
-            "first_name": first_name,
-            "username": username,
-            "is_registered": False,
-            "referral_count": 0,
-            "coins": 0,
-            "referred_by": None,
-            "language": "si", # Default language
-            "joined_date": firestore.SERVER_TIMESTAMP
-        }
-        await doc_ref.set(user_data)
-        doc = await doc_ref.get() # නව දත්ත නැවත ලබා ගනී
-        logger.info(f"නව user {user_id} ({first_name}) Firestore වෙත එකතු කරන ලදී.")
-    
-    return doc
+# --- Bot පණිවිඩ (සිංහල සහ English) ---
+STRINGS = {
+    'welcome': {
+        'en': "👋 Welcome! Please select your language:",
+        'si': "👋 ආයුබෝවන්! කරුණාකර ඔබගේ භාෂාව තෝරන්න:",
+    },
+    'force_join': {
+        'en': (
+            "You must join our main channel to use this bot.\n\n"
+            f"Please join: {MAIN_CHANNEL_USERNAME}\n\n"
+            "After joining, press the '✅ Joined' button."
+        ),
+        'si': (
+            "මෙම bot භාවිතා කිරීමට, ඔබ අපගේ ප්‍රධාන නාලිකාවට (channel) සම්බන්ධ විය යුතුය.\n\n"
+            f"කරුණාකර සම්බන්ධ වන්න: {MAIN_CHANNEL_USERNAME}\n\n"
+            "සම්බන්ධ වූ පසු, '✅ සම්බන්ධ වුනා' බොත්තම ඔබන්න."
+        ),
+    },
+    'force_register': {
+        'en': "Thanks for joining! 🙏\n\nNow, you need to register to get your referral link and access the bot.\n\nPlease use the command: `/register`",
+        'si': "සම්බන්ධ වීම ගැන ස්තූතියි! 🙏\n\nදැන්, bot වෙත පිවිසීමට සහ ඔබගේ referral link එක ලබා ගැනීමට ඔබ ලියාපදිංචි විය යුතුය.\n\nකරුණාකර මෙම command එක භාවිතා කරන්න: `/register`",
+    },
+    'bot_menu_title': {
+        'en': "✅ Welcome to the Bot Menu!\n\nHow can I help you?",
+        'si': "✅ Bot Menu වෙත සාදරයෙන් පිළිගනිමු!\n\nමම ඔබට උදව් කළ හැක්කේ කෙසේද?",
+    },
+    'register_success': {
+        'en': "✅ You are successfully registered!\n\nUse the buttons below to navigate.",
+        'si': "✅ ඔබ සාර්ථකව ලියාපදිංචි විය!",
+    },
+    'already_registered': {
+        'en': "You are already registered. Use the menu buttons to navigate.",
+        'si': "ඔබ දැනටමත් ලියාපදිංචි වී ඇත. මෙනු බොත්තම් භාවිතා කරන්න.",
+    },
+    'my_account': {
+        'en': "👤 **My Account**\n\n- **Your Coins:** `{coins}` 🪙\n- **Total Referrals:** `{refs}` 🙋‍♂️\n\n**Your Referral Link:**\n`{ref_link}`",
+        'si': "👤 **මගේ ගිණුම**\n\n- **ඔබේ කාසි (Coins):** `{coins}` 🪙\n- **සම්පූර්ණ යොමු කිරීම් (Referrals):** `{refs}` 🙋‍♂️\n\n**ඔබගේ Referral Link එක:**\n`{ref_link}`",
+    },
+    'shop_title': {
+        'en': "🛍️ **Premium V2Ray Shop**\n\nUse your coins to buy a package. Buying a package will alert the admin to create your service.\n\nYour Coins: `{coins}` 🪙",
+        'si': "🛍️ **Premium V2Ray වෙළඳසැල**\n\nPackage එකක් මිලදී ගැනීමට ඔබගේ කාසි (coins) භාවිතා කරන්න. ඔබ මිලදී ගත් විට, admin හට service එක සෑදීමට දැනුම් දීමක් යයි.\n\nඔබේ කාසි: `{coins}` 🪙",
+    },
+    'not_enough_coins': {
+        'en': "❌ **Purchase Failed**\n\nSorry, you don't have enough coins for this package.\n\n- Your Coins: `{coins}` 🪙\n- Package Cost: `{cost}` 🪙",
+        'si': "❌ **මිලදී ගැනීම අසාර්ථකයි**\n\nකණගාටුයි, මෙම package එක සඳහා ඔබට ප්‍රමාණවත් කාසි නොමැත.\n\n- ඔබේ කාසි: `{coins}` 🪙\n- Package මිල: `{cost}` 🪙",
+    },
+    'purchase_success': {
+        'en': "✅ **Purchase Successful!**\n\n`{cost}` coins have been deducted from your account.\n\nThe admin has been notified. Please wait patiently, your service will be created soon.",
+        'si': "✅ **මිලදී ගැනීම සාර්ථකයි!**\n\nඔබගේ ගිණුමෙන් කාසි `{cost}` ක් අඩු කර ඇත.\n\nAdmin වෙත දැනුම් දී ඇත. කරුණාකර රැඳී සිටින්න, ඔබගේ service එක ඉක්මනින් සාදනු ඇත.",
+    },
+    'purchase_alert_to_admin': {
+        'en': (
+            "🔔 **New Purchase Alert!** 🔔\n\n"
+            "**User:** {mention} (ID: `{user_id}`)\n"
+            "**Package:** {package_name}\n"
+            "**Cost:** {cost} Coins\n\n"
+            "Please create the service for this user."
+        ),
+        'si': (
+            "🔔 **නව මිලදී ගැනීමක්!** 🔔\n\n"
+            "**User:** {mention} (ID: `{user_id}`)\n"
+            "**Package:** {package_name}\n"
+            "**මිල:** {cost} කාසි\n\n"
+            "කරුණාකර මෙම user හට service එක සාදා දෙන්න."
+        ),
+    },
+    'get_free_v2ray_no_post': {
+        'en': "Sorry, the admin hasn't set up a free V2Ray post yet. Please check back later.",
+        'si': "කණගාටුයි, admin තවමත් නොමිලේ V2Ray post එකක් සකසා නැත. කරුණාකර පසුව නැවත උත්සාහ කරන්න.",
+    },
+    'get_free_v2ray_follow_up': {
+        'en': (
+            "That was a free server!\n\n"
+            "Tired of slow, crowded free servers? Get your own **Premium V2Ray** server!\n\n"
+            "✅ High Speed\n"
+            "✅ 99% Uptime\n"
+            "✅ Low Ping\n\n"
+            "Click /shop to see packages or /myaccount to check your coins!"
+        ),
+        'si': (
+            "එය නොමිලේ දෙන ලද server එකකි!\n\n"
+            "මන්දගාමී, සෙනඟ පිරුණු free server වලින් වෙහෙසට පත්ව සිටිනවාද? ඔබගේම **Premium V2Ray** server එකක් ලබා ගන්න!\n\n"
+            "✅ අධික වේගය\n"
+            "✅ 99% Uptime\n"
+            "✅ අඩු Ping අගය\n\n"
+            "Package බැලීමට /shop click කරන්න, නැතහොත් ඔබගේ කාසි (coins) බැලීමට /myaccount click කරන්න!"
+        ),
+    },
+    'support_start': {
+        'en': " gaskets **Support System**\n\nPlease type your question or problem now. The admin will receive your message and your User ID.\n\nType /cancel to abort.",
+        'si': " gaskets **සහාය පද්ධතිය (Support)**\n\nකරුණාකර ඔබගේ ප්‍රශ්නය හෝ ගැටලුව දැන් type කරන්න. Admin හට ඔබගේ පණිවිඩය සහ ඔබගේ User ID එක ලැබෙනු ඇත.\n\nඅවලංගු කිරීමට /cancel ලෙස type කරන්න.",
+    },
+    'support_message_sent': {
+        'en': "✅ Your message has been sent to the admin. They will reply as soon as possible.",
+        'si': "✅ ඔබගේ පණිවිඩය admin වෙත යවන ලදී. ඔවුන් හැකි ඉක්මනින් පිළිතුරු දෙනු ඇත.",
+    },
+    'support_forward_to_admin': {
+        'en': "Support ticket from {mention} (ID: `{user_id}`):\n\n--- MESSAGE ---",
+        'si': "{mention} (ID: `{user_id}`) ගෙන් support පණිවිඩයක්:\n\n--- MESSAGE ---",
+    },
+    'support_reply_admin_prompt': {
+        'en': "To reply, use:\n`/reply {user_id} Your message here`",
+        'si': "පිළිතුරු දීමට, මෙය භාවිතා කරන්න:\n`/reply {user_id} ඔබගේ පණිවිඩය`",
+    },
+    'support_reply_success_admin': {
+        'en': "✅ Reply sent to User ID `{user_id}`.",
+        'si': "✅ User ID `{user_id}` වෙත පිළිතුර යවන ලදී.",
+    },
+    'support_reply_fail_admin': {
+        'en': "❌ Failed to send reply. The user might have blocked the bot. Error: {error}",
+        'si': "❌ පිළිතුර යැවීමට නොහැකි විය. User සමහරවිට bot ව block කර ඇත. දෝෂය: {error}",
+    },
+    'support_reply_received_user': {
+        'en': "📨 **Reply from Admin:**\n\n`{message}`",
+        'si': "📨 **Admin ගෙන් පිළිතුරක්:**\n\n`{message}`",
+    },
+    'support_cancel': {
+        'en': "Support request cancelled.",
+        'si': "Support ඉල්ලීම අවලංගු කරන ලදී.",
+    }
+}
 
-async def get_bot_settings() -> dict:
-    doc_ref = db.collection('config').document('bot_settings')
-    doc = await doc_ref.get()
+# --- Premium Shop Packages ---
+# 'callback_data': (Display Name, Price in Coins)
+SHOP_PACKAGES = {
+    "buy_30d_50g": ("30 Day - 50GB", 100),
+    "buy_30d_100g": ("30 Day - 100GB", 200),
+    "buy_30d_unlim": ("30 Day - Unlimited GB", 300),
+    "buy_50d_50g": ("50 Day - 50GB", 200),
+    "buy_50d_100g": ("50 Day - 100GB", 300),
+    "buy_50d_unlim": ("50 Day - Unlimited GB", 400),
+}
+
+
+# --- Logging Setup ---
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+
+# === Utility Functions (උපකාරක Functions) ===
+
+async def get_user_data(user_id):
+    """Firestore එකෙන් user දත්ත ලබා ගනී."""
+    doc = users_ref.document(str(user_id)).get()
     if doc.exists:
         return doc.to_dict()
     else:
-        await doc_ref.set({'free_v2ray_post_id': None})
+        # Default user data (අලුත් user)
+        return {
+            'id': user_id,
+            'is_registered': False,
+            'referral_count': 0,
+            'coins': 0,
+            'referred_by': None,
+            'language': 'en' # Default භාෂාව English
+        }
+
+async def update_user_data(user_id, data):
+    """Firestore එකේ user දත්ත යාවත්කාලීන කරයි."""
+    users_ref.document(str(user_id)).set(data, merge=True)
+
+async def get_admin_settings():
+    """Firestore එකෙන් admin settings ලබා ගනී."""
+    doc = admin_ref.document("settings").get()
+    if doc.exists:
+        return doc.to_dict()
+    else:
         return {'free_v2ray_post_id': None}
 
-# --- General Helper Functions ---
+async def update_admin_settings(data):
+    """Firestore එකේ admin settings යාවත්කාලීන කරයි."""
+    admin_ref.document("settings").set(data, merge=True)
 
-async def is_user_in_channel(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def check_channel_membership(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """User, channel එකේ සාමාජිකයෙක්දැයි පරීක්ෂා කරයි."""
     try:
         member = await context.bot.get_chat_member(chat_id=MAIN_CHANNEL_ID, user_id=user_id)
-        if member.status in ['creator', 'administrator', 'member']:
+        if member.status in ["member", "administrator", "creator"]:
             return True
-    except (Forbidden, BadRequest) as e:
-        logger.error(f"Channel check error (Bot channel එකේ admin ද?): {e}")
+        else:
+            return False
     except Exception as e:
-        logger.error(f"Unknown channel check error: {e}")
-    return False
+        logger.error(f"Channel membership පරීක්ෂා කිරීමේ දෝෂයක් (ID: {user_id}): {e}")
+        # Bot එක channel එකේ admin නැත්නම් හෝ ID වැරදි නම්, error එකක් එයි.
+        # මෙහිදී user ට වාසිදායක ලෙස True ලෙස return කිරීම (තාවකාලිකව)
+        return False # ආරක්‍ෂිතම දේ False return කිරීමයි
 
-async def send_join_channel_message(target, lang: str = 'si'):
+def get_string(key: str, lang: str):
+    """භාෂාවට අදාළව නියමිත පණිවිඩය ලබා දෙයි."""
+    if key in STRINGS and lang in STRINGS[key]:
+        return STRINGS[key][lang]
+    # භාෂාව නොමැති නම් default English පෙන්වයි
+    elif key in STRINGS and 'en' in STRINGS[key]:
+        return STRINGS[key]['en']
+    else:
+        return f"MISSING_STRING_FOR_{key}"
+
+def user_mention(user):
+    """Markdown වලදී user ව mention කිරීමට short-hand එකක්."""
+    if user.username:
+        return f"@{user.username}"
+    else:
+        return f"[{user.first_name}](tg://user?id={user.id})"
+
+# === User Check Decorator ===
+# (මෙය /shop, /free, /myaccount වැනි commands වලට පෙර run වේ)
+
+from functools import wraps
+
+def user_checks(func):
     """
-    (UPDATED) Channel එකට join වීමට පණිවිඩය (භාෂාවට අදාළව) යවයි.
+    Decorator එකක්. User, channel එකේ සහ register වී ඇත්දැයි පරීක්ෂා කරයි.
+    නැතහොත්, අදාළ "force" පණිවිඩය යවයි.
     """
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Channel එකට Join වන්න / Join Channel", url=CHANNEL_INVITE_LINK)]
-    ])
-    text = get_string(lang, 'please_join')
-    
-    try:
-        if isinstance(target, Update): # message එකක් නම්
-            target_message = target.message or target.callback_query.message
-            if target_message:
-                await target_message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
-        else: # target එක message object එකක් නම් (fallback)
-            await target.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Send Join Msg Error: {e}")
+    @wraps(func)
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user = update.effective_user
+        user_data = await get_user_data(user.id)
+        lang = user_data.get('language', 'en') # User ගේ භාෂාව ලබා ගනී
+
+        # 1. Channel Member Check
+        is_member = await check_channel_membership(user.id, context)
+        if not is_member:
+            keyboard = [[InlineKeyboardButton(f"🔗 {MAIN_CHANNEL_USERNAME}", url=CHANNEL_INVITE_LINK)],
+                        [InlineKeyboardButton(f"✅ {get_string('joined_button', lang)}", callback_data="check_join_menu")]]
+            await update.message.reply_text(
+                get_string('force_join', lang),
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                disable_web_page_preview=True
+            )
+            return
+
+        # 2. Registration Check
+        if not user_data.get('is_registered', False):
+            await update.message.reply_text(get_string('force_register', lang))
+            return
+
+        # Checks Pass
+        # User, channel එකේ සහ register වී ඇත්නම්, අදාළ command එක (func) run කරයි
+        return await func(update, context, user_data, lang)
+
+    return wrapped
 
 
-# --- (UPDATED) Pre-check Decorator ---
-
-def user_checks(check_registered: bool = True):
-    """
-    Decorator: Channel join සහ registration (භාෂාවට අදාළව) පරීක්ෂා කරයි.
-    """
-    def decorator(func):
-        @wraps(func)
-        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-            user = update.effective_user
-            if not user:
-                return # User හඳුනාගත නොහැකි නම් නතර කිරීම
-
-            # User doc එක ලබා ගැනීම (මෙහිදී භාෂාවද ලැබේ)
-            user_doc = await get_user_doc(user.id, user.first_name, user.username)
-            user_data = user_doc.to_dict()
-            lang = user_data.get('language', 'si') # User ගේ භාෂාව ලබා ගැනීම
-
-            # 1. Channel Check (සැමවිටම)
-            if not await is_user_in_channel(user.id, context):
-                await send_join_channel_message(update, lang)
-                return
-
-            # 2. Register Check (අවශ්‍ය නම් පමණි)
-            if check_registered and not user_data.get('is_registered', False):
-                await update.message.reply_text(
-                    get_string(lang, 'err_not_registered'),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            # Checks ok, user_data (භාෂාව සමග) command එකට pass කිරීම
-            return await func(update, context, user_data=user_data, *args, **kwargs)
-        return wrapped
-    return decorator
-
-# === Command Handlers (ප්‍රධාන අණ) ===
+# === Bot Command Handlers ===
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    (NEW) /start command.
-    වෙන කිසිවක් නොකර, භාෂා තේරීමේ බොත්තම් පමණක් පෙන්වයි.
-    """
-    if not update.message: return # Message එකක් නොමැතිනම් (e.g. channel post)
+    """Bot ආරම්භක command එක. Referral logic සහ language select."""
+    user = update.effective_user
+    user_data = await get_user_data(user.id)
+    args = context.args
 
-    keyboard = [
-        [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
-        [InlineKeyboardButton("🇱🇰 සිංහල (Sinhala)", callback_data="lang_si")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        get_string('en', 'select_language') + "\n\n" + get_string('si', 'select_language'),
-        reply_markup=reply_markup
-    )
+    # --- Language Selection (භාෂාව තේරීම) ---
+    # User register වී නැත්නම් හෝ language එකක් set කර නැත්නම්
+    if not user_data.get('is_registered', False) or not user_data.get('language'):
+        # Referral Logic (භාෂාව තේරීමට පෙරම referral save කර ගනී)
+        # User අලුත් සහ referral link එකකින් පැමිණියේ නම්
+        if not user_data.get('referred_by') and args and args[0].isdigit():
+            referrer_id = int(args[0])
+            if referrer_id != user.id:
+                user_data['referred_by'] = referrer_id
+                await update_user_data(user.id, user_data)
+                logger.info(f"User {user.id} was referred by {referrer_id} (pending registration)")
 
-async def language_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    (NEW) භාෂා තේරීමේ බොත්තම් (lang_en / lang_si) handle කරයි.
-    මෙය පැරණි /start logic එක ප්‍රතිස්ථාපනය කරයි.
-    """
-    query = update.callback_query
-    if not query or not query.message: return
-        
-    await query.answer()
-    
-    # --- (FIXED) User ලබාගන්නා ක්‍රමය වෙනස් කරන ලදී ---
-    user = query.from_user 
-    # -----------------------------------------------
-    
-    if not user: return
-
-    lang_code = query.data.split('_')[1] # 'en' or 'si'
-
-    # 1. User doc එක ලබාගෙන භාෂාව Save කිරීම
-    user_doc = await get_user_doc(user.id, user.first_name, user.username)
-    await user_doc.reference.update({"language": lang_code})
-    
-    user_data = (await user_doc.reference.get()).to_dict() # යාවත්කාලීන දත්ත
-
-    # 2. Channel Check
-    if not await is_user_in_channel(user.id, context):
-        await send_join_channel_message(query.message, lang_code)
+        # Language selection buttons
+        keyboard = [
+            [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
+            [InlineKeyboardButton("🇱🇰 සිංහල", callback_data="lang_si")],
+        ]
+        await update.message.reply_text(
+            f"{get_string('welcome', 'en')}\n\n{get_string('welcome', 'si')}", # භාෂා දෙකෙන්ම පෙන්වයි
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
-    # User channel එකේ සිටී.
-    # 3. Register Check
-    if not user_data.get('is_registered', False):
-        # --- ලියාපදිංචි වී නැත්නම් ---
-        text = get_string(lang_code, 'welcome_not_registered').format(first_name=user.first_name)
-    else:
-        # --- ලියාපදිංචි වී ඇත්නම් (Bot Menu) ---
-        text = get_string(lang_code, 'welcome_registered').format(
-            first_name=user.first_name,
-            coins=user_data.get('coins', 0)
+    # --- User දැනටමත් register වී, භාෂාවක් තෝරා ඇත්නම් ---
+    lang = user_data['language']
+    is_member = await check_channel_membership(user.id, context)
+
+    if not is_member:
+        keyboard = [[InlineKeyboardButton(f"🔗 {MAIN_CHANNEL_USERNAME}", url=CHANNEL_INVITE_LINK)],
+                    [InlineKeyboardButton(f"✅ {get_string('joined_button', lang)}", callback_data="check_join_menu")]]
+        await update.message.reply_text(
+            get_string('force_join', lang),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
         )
+    else:
+        # User is member and registered, show bot menu
+        await show_bot_menu(update, context, lang)
+
+
+async def language_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Language selection button එක handle කරයි."""
+    query = update.callback_query
+    # --- (FIXED) effective_user වෙනුවට from_user භාවිතා කිරීම ---
+    user = query.from_user 
+    # ----------------------------------------------------
+    await query.answer()
     
-    # User ට තේරූ භාෂාවෙන් පිළිතුරු දීම
-    try:
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
-    except BadRequest as e:
-        if "message is not modified" in str(e):
-            pass # Message එක වෙනස් වී නැත්නම්, දෝෂයක් නොපෙන්වීම
-        else:
-            logger.warning(f"Language button edit error: {e}")
-            await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN) # Fallback
+    lang_code = query.data.split("_")[1] # "lang_en" -> "en"
+    
+    user_data = await get_user_data(user.id)
+    user_data['language'] = lang_code
+    await update_user_data(user.id, user_data)
+    
+    logger.info(f"User {user.id} selected language: {lang_code}")
+
+    # භාෂාව තේරූ පසු, channel check එක run කරයි
+    is_member = await check_channel_membership(user.id, context)
+    
+    if not is_member:
+        keyboard = [[InlineKeyboardButton(f"🔗 {MAIN_CHANNEL_USERNAME}", url=CHANNEL_INVITE_LINK)],
+                    [InlineKeyboardButton(f"✅ {get_string('joined_button', lang_code)}", callback_data="check_join_menu")]]
+        await query.edit_message_text(
+            get_string('force_join', lang_code),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+    else:
+        # Channel එකේ සිටී නම්, register පණිවිඩය පෙන්වයි
+        await query.edit_message_text(get_string('force_register', lang_code))
 
 
 async def register_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    (UPDATED) /register command (භාෂාවට අදාළව)
-    """
+    """User ලියාපදිංචි කිරීමේ command එක."""
     user = update.effective_user
-    if not user or not update.message: return
+    user_data = await get_user_data(user.id)
+    lang = user_data.get('language', 'en')
 
-    # (මෙහි decorator නැත. Manual checks)
-    user_doc_ref = db.collection('users').document(str(user.id))
-    user_doc = await user_doc_ref.get()
-    
-    if not user_doc.exists:
-        user_doc = await get_user_doc(user.id, user.first_name, user.username)
-        
-    user_data = user_doc.to_dict()
-    lang = user_data.get('language', 'si')
-
-    # 1. Channel Check
-    if not await is_user_in_channel(user.id, context):
-        await send_join_channel_message(update.message, lang)
+    # 1. Channel Member Check
+    is_member = await check_channel_membership(user.id, context)
+    if not is_member:
+        keyboard = [[InlineKeyboardButton(f"🔗 {MAIN_CHANNEL_USERNAME}", url=CHANNEL_INVITE_LINK)],
+                    [InlineKeyboardButton(f"✅ {get_string('joined_button', lang)}", callback_data="check_join_register")]]
+        await update.message.reply_text(
+            get_string('force_join', lang),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
         return
-
-    # 2. දැනටමත් register ද?
+    
+    # 2. Already Registered Check
     if user_data.get('is_registered', False):
-        await update.message.reply_text(get_string(lang, 'register_already'))
+        await update.message.reply_text(get_string('already_registered', lang))
+        await show_bot_menu(update, context, lang)
         return
 
-    # --- නව ලියාපදිංචිය ---
-    await user_doc_ref.update({"is_registered": True})
+    # --- New Registration Process ---
+    user_data['is_registered'] = True
+    user_data['username'] = user.username or user.first_name
     
-    bot_username = context.bot_data.get('username', 'YOUR_BOT_USERNAME')
-    referral_link = f"https://t.me/{bot_username}?start={user.id}"
-    
-    text = get_string(lang, 'register_success').format(
-        link=referral_link,
-        value=REFERRAL_COIN_VALUE
-    )
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True
-    )
-
-    # 3. Referral Logic
-    referrer_id = None
-    if context.args:
-        try: referrer_id = int(context.args[0])
-        except (IndexError, ValueError): pass
-
-    if user_data.get('referred_by') is None and referrer_id and referrer_id != user.id:
-        referrer_doc_ref = db.collection('users').document(str(referrer_id))
-        referrer_doc = await referrer_doc_ref.get()
-
-        if referrer_doc.exists:
-            referrer_lang = referrer_doc.to_dict().get('language', 'si')
+    # Referral Coin Logic
+    referrer_id = user_data.get('referred_by')
+    if referrer_id:
+        # Referrer (හඳුන්වා දුන් user) ගේ දත්ත update කරයි
+        referrer_data = await get_user_data(referrer_id)
+        # Referrer ද register වී ඇත්නම් පමණක් coins දෙයි
+        if referrer_data.get('is_registered', False):
+            referrer_data['referral_count'] = referrer_data.get('referral_count', 0) + 1
+            referrer_data['coins'] = referrer_data.get('coins', 0) + COINS_PER_REFERRAL
+            await update_user_data(referrer_id, referrer_data)
             
-            await referrer_doc_ref.update({
-                "coins": firestore.Increment(REFERRAL_COIN_VALUE),
-                "referral_count": firestore.Increment(1)
-            })
-            await user_doc_ref.update({"referred_by": referrer_id})
+            logger.info(f"User {referrer_id} received {COINS_PER_REFERRAL} coins for referring {user.id}")
             
+            # Referrer ට දන්වයි (Optional)
             try:
-                new_balance = (referrer_doc.to_dict().get('coins', 0)) + REFERRAL_COIN_VALUE
-                notify_text = get_string(referrer_lang, 'referral_notify').format(
-                    user_name=user.first_name,
-                    value=REFERRAL_COIN_VALUE,
-                    new_balance=new_balance
+                ref_lang = referrer_data.get('language', 'en')
+                await context.bot.send_message(
+                    chat_id=referrer_id,
+                    text=f"Congrats! A user you referred ({user_mention(user)}) has joined. You received {COINS_PER_REFERRAL} coins! 🪙"
+                         if ref_lang == 'en' else
+                         f"සුබ පැතුම්! ඔබ හඳුන්වා දුන් user ({user_mention(user)}) සම්බන්ධ විය. ඔබට කාසි {COINS_PER_REFERRAL} ක් ලැබුණා! 🪙",
+                    parse_mode=ParseMode.MARKDOWN
                 )
-                await context.bot.send_message(chat_id=referrer_id, text=notify_text)
             except Exception as e:
-                logger.warning(f"Referrer {referrer_id} ට message යැවීමට නොහැකි විය: {e}")
+                logger.warning(f"Referrer {referrer_id} ට පණිවිඩය යැවීමට නොහැකි විය: {e}")
+        else:
+            logger.info(f"Referrer {referrer_id} is not registered. Holding referral for {user.id}.")
+            # (Note: Referrer register වූ විට මෙම coin දෙන්නට logic එකක් අවශ්‍ය නම්, එය සංකීර්ණයි)
 
-@user_checks(check_registered=True)
-async def myaccount_command(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data: dict = None):
-    """
-    (UPDATED) /myaccount (භාෂාවට අදාළව)
-    """
-    user = update.effective_user
-    lang = user_data.get('language', 'si')
-    bot_username = context.bot_data.get('username', 'YOUR_BOT_USERNAME')
-    referral_link = f"https://t.me/{bot_username}?start={user.id}"
+    await update_user_data(user.id, user_data)
+    logger.info(f"New user registered: {user.id} ({user_data['username']})")
+
+    await update.message.reply_text(get_string('register_success', lang))
+    await show_bot_menu(update, context, lang)
+
+
+async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'✅ Joined' button එක handle කරයි."""
+    query = update.callback_query
+    # --- (FIXED) effective_user වෙනුවට from_user භාවිතා කිරීම ---
+    user = query.from_user
+    # ----------------------------------------------------
     
-    text = get_string(lang, 'my_account').format(
-        ref_count=user_data.get('referral_count', 0),
-        coins=user_data.get('coins', 0),
-        link=referral_link
-    )
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True
-    )
+    user_data = await get_user_data(user.id)
+    lang = user_data.get('language', 'en')
 
-@user_checks(check_registered=True)
-async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data: dict = None):
-    """
-    (UPDATED) /shop (භාෂාවට අදාළව)
-    """
-    lang = user_data.get('language', 'si')
-    coin_balance = user_data.get('coins', 0)
+    is_member = await check_channel_membership(user.id, context)
+
+    if is_member:
+        await query.answer("✅ Thank you for joining!")
+        callback_action = query.data # "check_join_menu" or "check_join_register"
+        
+        if callback_action == "check_join_register" or not user_data.get('is_registered', False):
+            # Register command එක run කිරීමට user ව යොමු කරයි
+            await query.edit_message_text(get_string('force_register', lang))
+        else:
+            # Bot menu එක පෙන්වයි
+            await query.edit_message_text(get_string('bot_menu_title', lang))
+            await show_bot_menu(update, context, lang, query.message.message_id) # message edit කරයි
+    else:
+        await query.answer("❌ You haven't joined the channel yet.", show_alert=True)
+
+
+async def show_bot_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str, edit_message_id: int = None):
+    """ප්‍රධාන bot menu (buttons) පෙන්වයි."""
+    keyboard = [
+        [
+            InlineKeyboardButton(f"🛍️ {get_string('shop_button', lang)}", callback_data="menu_shop"),
+            InlineKeyboardButton(f"🎁 {get_string('free_button', lang)}", callback_data="menu_free"),
+        ],
+        [
+            InlineKeyboardButton(f"👤 {get_string('account_button', lang)}", callback_data="menu_account"),
+            InlineKeyboardButton(f"SUPPORT {get_string('support_button', lang)}", callback_data="menu_support"),
+        ]
+    ]
+    
+    text = get_string('bot_menu_title', lang)
+    
+    if edit_message_id:
+        # පවතින message එක edit කරයි (e.g., check_join පසු)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=edit_message_id,
+                text=text,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            logger.warning(f"Bot menu edit කිරීමේ දෝෂයක්: {e}")
+            # Edit fail වුනොත්, අලුත් message එකක් යවයි
+            await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    elif update.message:
+        # අලුත් message එකක් යවයි (command එකක් ලෙස)
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    elif update.callback_query:
+        # callback query එකකට පිළිතුරු ලෙස (e.g., back to menu)
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ප්‍රධාන menu බොත්තම් handle කරයි."""
+    query = update.callback_query
+    await query.answer()
+    
+    # --- (FIXED) effective_user වෙනුවට from_user භාවිතා කිරීම ---
+    user = query.from_user
+    # ----------------------------------------------------
+    user_data = await get_user_data(user.id)
+    lang = user_data.get('language', 'en')
+    
+    # User checks (නැවතත් පරීක්ෂා කිරීම)
+    is_member = await check_channel_membership(user.id, context)
+    if not is_member or not user_data.get('is_registered', False):
+        await query.message.reply_text("Please /start the bot again.")
+        return
+
+    # Menu actions
+    action = query.data.split("_")[-1] # "menu_shop" -> "shop"
+
+    if action == "shop":
+        await shop_command(update, context, user_data, lang, as_callback=True)
+    elif action == "free":
+        await free_command(update, context, user_data, lang, as_callback=True)
+    elif action == "account":
+        await myaccount_command(update, context, user_data, lang, as_callback=True)
+    elif action == "support":
+        # Support command එක ConversationHandler එකක් නිසා,
+        # අපි command එකක් call කරනවා වගේ පටන් ගන්න ඕනේ.
+        await support_start(update, context, as_callback=True)
+
+
+@user_checks
+async def myaccount_command(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data, lang, as_callback=False):
+    """User ගේ coin balance සහ referral link එක පෙන්වයි."""
+    bot_username = (await context.bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start={user_data['id']}"
+    
+    text = get_string('my_account', lang).format(
+        coins=user_data.get('coins', 0),
+        refs=user_data.get('referral_count', 0),
+        ref_link=ref_link
+    )
+    
+    if as_callback:
+        query = update.callback_query
+        keyboard = [[InlineKeyboardButton(f"⬅️ {get_string('back_button', lang)}", callback_data="back_to_menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+
+@user_checks
+async def shop_command(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data, lang, as_callback=False):
+    """Premium shop එක (buttons) පෙන්වයි."""
+    text = get_string('shop_title', lang).format(coins=user_data.get('coins', 0))
     
     keyboard = []
-    for key, product in PRODUCTS.items():
-        text = f"{product['name']} - {product['price']} Coins"
-        callback_data = f"buy_{key}"
-        keyboard.append([InlineKeyboardButton(text, callback_data=callback_data)])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = get_string(lang, 'shop_title').format(coins=coin_balance)
+    # SHOP_PACKAGES dictionary එකෙන් බොත්තම් සාදයි
+    for callback_data, (display_name, price) in SHOP_PACKAGES.items():
+        button_text = f"{display_name} - {price} 🪙"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
     
-    await update.message.reply_text(text, reply_markup=reply_markup)
-
-@user_checks(check_registered=True)
-async def free_command(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data: dict = None):
-    """
-    (UPDATED) /free (භාෂාවට අදාළව)
-    """
-    user_id = update.effective_user.id
-    lang = user_data.get('language', 'si')
-    settings = await get_bot_settings()
-    post_id = settings.get('free_v2ray_post_id')
+    keyboard.append([InlineKeyboardButton(f"⬅️ {get_string('back_button', lang)}", callback_data="back_to_menu")])
     
-    if not post_id or post_id == 0:
-        await update.message.reply_text(get_string(lang, 'free_no_config'))
+    if as_callback:
+        query = update.callback_query
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
+
+@user_checks
+async def free_command(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data, lang, as_callback=False):
+    """Admin විසින් set කළ free V2Ray post එක forward කරයි."""
+    admin_settings = await get_admin_settings()
+    post_id = admin_settings.get('free_v2ray_post_id')
+    
+    message = update.message if not as_callback else update.callback_query.message
+
+    if not post_id:
+        await message.reply_text(get_string('get_free_v2ray_no_post', lang))
         return
 
     try:
-        # 1. Free V2ray එක Forward කිරීම
+        # Main Channel එකෙන් අදාළ post එක forward කරයි
         await context.bot.forward_message(
-            chat_id=user_id,
+            chat_id=message.chat_id,
             from_chat_id=MAIN_CHANNEL_ID,
             message_id=post_id
         )
+        # Follow-up message (Premium ගැන)
+        await message.reply_text(get_string('get_free_v2ray_follow_up', lang))
         
-        # 2. Follow-up Premium Message
-        await asyncio.sleep(1)
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=get_string(lang, 'free_success_followup'),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-    except BadRequest as e:
-        if "message to forward not found" in str(e).lower():
-            await update.message.reply_text(get_string(lang, 'err_admin_post_deleted'))
-            await context.bot.send_message(OWNER_ID, f"⚠️ ERROR: /free command එක අසාර්ථකයි. Post ID {post_id} channel එකේ නැත! /setfree මගින් අලුත් ID එකක් යොදන්න.")
-        else:
-            await update.message.reply_text(get_string(lang, 'err_generic').format(e=e))
     except Exception as e:
-        logger.error(f"/free command error: {e}")
-        await update.message.reply_text(get_string(lang, 'err_generic').format(e=e))
+        logger.error(f"Free post (ID: {post_id}) forward කිරීමේ දෝෂයක්: {e}")
+        await message.reply_text("Error: Could not retrieve the free V2Ray post. The admin may need to update it.")
+    
+    if as_callback:
+        # Callback query එකක් නම්, "Back" button එකක් යවයි
+        keyboard = [[InlineKeyboardButton(f"⬅️ {get_string('back_button', lang)}", callback_data="back_to_menu")]]
+        await message.reply_text(f"⬆️ {get_string('above_is_free', lang)}", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    (UPDATED) Shop එකේ 'Buy' බොත්තම් (භාෂාවට අදාළව)
-    """
+
+async def shop_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shop එකේ "Buy" බොත්තම් handle කරයි."""
     query = update.callback_query
-    if not query or not query.message: return
-        
+    # --- (FIXED) effective_user වෙනුවට from_user භාවිතා කිරීම ---
+    user = query.from_user
+    # ----------------------------------------------------
     await query.answer()
     
-    # --- (FIXED) User ලබාගන්නා ක්‍රමය වෙනස් කරන ලදී ---
+    user_data = await get_user_data(user.id)
+    lang = user_data.get('language', 'en')
+    
+    package_key = query.data # e.g., "buy_30d_50g"
+    
+    if package_key not in SHOP_PACKAGES:
+        await query.message.reply_text("Error: Invalid package selected.")
+        return
+
+    package_name, package_cost = SHOP_PACKAGES[package_key]
+    user_coins = user_data.get('coins', 0)
+
+    # Check if user has enough coins
+    if user_coins < package_cost:
+        await query.message.reply_text(
+            get_string('not_enough_coins', lang).format(
+                coins=user_coins,
+                cost=package_cost
+            )
+        )
+        return
+
+    # --- Purchase is successful ---
+    # 1. Deduct coins
+    user_data['coins'] = user_coins - package_cost
+    await update_user_data(user.id, user_data)
+    
+    # 2. Notify user
+    await query.message.reply_text(
+        get_string('purchase_success', lang).format(cost=package_cost)
+    )
+    
+    # 3. Notify admin
+    try:
+        admin_alert_text = get_string('purchase_alert_to_admin', 'en').format( # Admin ට English වලින්
+            mention=user_mention(user),
+            user_id=user.id,
+            package_name=package_name,
+            cost=package_cost
+        )
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=admin_alert_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Admin (ID: {OWNER_ID}) ට purchase alert එක යැවීමේ දෝෂයක්: {e}")
+
+    # Go back to menu
+    await show_bot_menu(update, context, lang, query.message.message_id)
+
+
+async def back_to_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'Back' button (Shop/Account වලින්) handle කරයි."""
+    query = update.callback_query
+    await query.answer()
+    # --- (FIXED) effective_user වෙනුවට from_user භාවිතා කිරීම ---
     user = query.from_user
-    # -----------------------------------------------
+    # ----------------------------------------------------
+    user_data = await get_user_data(user.id)
+    lang = user_data.get('language', 'en')
     
-    if not user: return
+    await show_bot_menu(update, context, lang, query.message.message_id)
+
+
+# === Support Conversation Handler ===
+
+@user_checks
+async def support_start(update: Update, context: ContextTypes.DEFAULT_TYPE, user_data, lang, as_callback=False):
+    """Support conversation එක පටන් ගනී."""
+    text = get_string('support_start', lang)
+    
+    if as_callback:
+        query = update.callback_query
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         
-    data = query.data
+    return TYPING_SUPPORT_MESSAGE # Conversation එකේ ඊළඟ state එකට යයි
+
+async def get_support_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User ගේ support message එක ලබාගෙන Admin ට forward කරයි."""
+    user = update.effective_user
+    user_data = await get_user_data(user.id)
+    lang = user_data.get('language', 'en')
     
-    if not data.startswith("buy_"):
-        return # මෙය 'lang_' button එකක් නොවේ
-
-    # User checks (Manual)
-    user_doc_ref = db.collection('users').document(str(user.id))
-    user_doc = await user_doc_ref.get()
+    message = update.message
     
-    if not user_doc.exists:
-        # User කෙසේ හෝ /shop වෙත ගොස් ඇත, නමුත් db එකේ නැත.
-        # (මෙය සිදුවිය නොහැක, නමුත් ආරක්ෂාව සඳහා)
-        await get_user_doc(user.id, user.first_name, user.username)
-        await query.message.reply_text("⛔ Error! Please type /start again.")
+    # 1. Admin ට Forward කරයි
+    try:
+        admin_alert_text = get_string('support_forward_to_admin', 'en').format( # Admin ට English වලින්
+            mention=user_mention(user),
+            user_id=user.id
+        )
+        admin_reply_prompt = get_string('support_reply_admin_prompt', 'en').format(user_id=user.id)
+        
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=admin_alert_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        # User ගේ message එක වෙනම forward කරයි (Stickers, Photos ආදියට)
+        await message.forward(chat_id=OWNER_ID)
+        # Admin ට reply කරන හැටි යවයි
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=admin_reply_prompt
+        )
+        
+        # 2. User ට දන්වයි
+        await message.reply_text(get_string('support_message_sent', lang))
+        
+    except Exception as e:
+        logger.error(f"Support message (User: {user.id}) forward කිරීමේ දෝෂයක්: {e}")
+        await message.reply_text("An error occurred while sending your message. Please try again.")
+
+    return ConversationHandler.END # Conversation එක අවසන් කරයි
+
+async def cancel_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Support conversation එක cancel කරයි."""
+    user = update.effective_user
+    user_data = await get_user_data(user.id)
+    lang = user_data.get('language', 'en')
+    
+    await update.message.reply_text(get_string('support_cancel', lang))
+    await show_bot_menu(update, context, lang) # Menu එක නැවත පෙන්වයි
+    return ConversationHandler.END
+
+
+
+# === Admin Command Handlers (Owner ට පමණි) ===
+
+async def admin_only_filter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Command එක Owner ගෙන් දැයි පරීක්ෂා කරයි."""
+    return update.message.from_user.id == OWNER_ID
+
+admin_filter = filters.Chat(OWNER_ID) & filters.COMMAND
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin ට සියලුම user ලාට broadcast කිරීමට."""
+    message = update.message
+    
+    if not message.reply_to_message:
+        await message.reply_text("Please reply to a message to broadcast it.")
         return
 
-    user_data = user_doc.to_dict()
-    lang = user_data.get('language', 'si')
-
-    if not await is_user_in_channel(user.id, context):
-        await send_join_channel_message(query.message, lang)
+    broadcast_message = message.reply_to_message
+    
+    # Firestore එකෙන් සියලුම registered user IDs ලබා ගනී
+    try:
+        all_users_docs = users_ref.where("is_registered", "==", True).stream()
+        user_ids = [doc.id for doc in all_users_docs]
+    except Exception as e:
+        await message.reply_text(f"Error fetching users from Firestore: {e}")
         return
 
-    if not user_data.get('is_registered', False):
-        await query.message.reply_text(get_string(lang, 'err_not_registered'))
+    if not user_ids:
+        await message.reply_text("No registered users found to broadcast to.")
         return
 
-    product_key = data[4:]
-    if product_key not in PRODUCTS:
-        await query.edit_message_text(get_string(lang, 'buy_err_no_package'))
+    await message.reply_text(f"Starting broadcast to {len(user_ids)} users...")
+    
+    success_count = 0
+    failed_count = 0
+    
+    # Batch sending
+    for i in range(0, len(user_ids), BROADCAST_BATCH_SIZE):
+        batch = user_ids[i:i + BROADCAST_BATCH_SIZE]
+        for user_id_str in batch:
+            try:
+                user_id = int(user_id_str)
+                await broadcast_message.copy(chat_id=user_id)
+                success_count += 1
+            except Exception as e:
+                failed_count += 1
+                logger.warning(f"Broadcast to user {user_id} failed: {e}")
+        
+        # Telegram flood limits වළක්වා ගැනීමට sleep
+        await asyncio.sleep(BROADCAST_SLEEP_TIME) 
+        
+    await message.reply_text(
+        f"Broadcast finished.\n"
+        f"✅ Sent successfully: {success_count}\n"
+        f"❌ Failed (bot blocked?): {failed_count}"
+    )
+
+
+async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Alias for /broadcast (broadcast command එකම call කරයි)"""
+    await broadcast_command(update, context)
+
+
+async def setfree_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/free command එක සඳහා post ID එක set කරයි."""
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: `/setfree <message_id>`\n\n(Get the ID by forwarding a post from your channel to me.)")
         return
         
-    product = PRODUCTS[product_key]
-    price = product['price']
-    
-    # --- Firebase Transaction ---
-    @firestore.async_transactional
-    async def process_purchase(transaction, user_ref, price_to_deduct):
-        doc = await user_ref.get(transaction=transaction)
-        current_balance = doc.to_dict().get('coins', 0)
-        if current_balance >= price_to_deduct:
-            new_balance = current_balance - price_to_deduct
-            transaction.update(user_ref, {"coins": new_balance})
-            return True, new_balance # සාර්ථකයි
-        else:
-            return False, current_balance # අසාර්ථකයි
+    post_id = int(args[0])
+    await update_admin_settings({'free_v2ray_post_id': post_id})
+    await update.message.reply_text(f"✅ Free V2Ray post ID has been set to: {post_id}")
 
-    try:
-        is_success, balance = await process_purchase(db.transaction(), user_doc_ref, price)
 
-        if is_success:
-            # --- සාර්ථකයි (Success) ---
-            text = get_string(lang, 'buy_success').format(
-                package_name=product['name'],
-                new_balance=balance
-            )
-            await query.edit_message_text(text)
-            
-            # Owner ට දැනුම් දීම (English)
-            user_mention = f"@{user.username}" if user.username else f"ID: {user.id}"
-            await context.bot.send_message(
-                chat_id=OWNER_ID,
-                text=f"🔔 **නව අලෙවියක්! (New Sale)** 🔔\n\n"
-                     f"**User:** {user.first_name} ({user_mention})\n"
-                     f"**Package:** {product['name']}\n"
-                     f"**Price Paid:** {price} Coins\n\n"
-                     f"කරුණාකර මොහුට V2ray config එක සාදා දෙන්න.",
-                disable_web_page_preview=True
-            )
-        else:
-            # --- අසාර්ථකයි (Failed) ---
-            text = get_string(lang, 'buy_fail_coins').format(
-                package_name=product['name'],
-                price=price,
-                balance=balance
-            )
-            await context.bot.send_message(chat_id=user.id, text=text, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Transaction error: {e}")
-        await query.message.reply_text(get_string(lang, 'buy_err_tx'))
-
-# === Admin & Broadcast Commands (මෙම කොටස් නොවෙනස්ව පවතී) ===
-
-async def owner_only_command(update: Update, context: ContextTypes.DEFAULT_TYPE, func):
-    """Owner ID එක පරීක්ෂා කරන Helper function එකක්"""
-    if not update.effective_user or update.effective_user.id != OWNER_ID:
-        logger.warning(f"Unauthorized access denied for {update.effective_user.id}.")
-        return
-    await func(update, context)
-
-async def send_command_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    replied_message = update.message.reply_to_message
-    if not replied_message:
-        await update.message.reply_text("භාවිතය: /send command එක ඔබ යැවීමට බලාපොරොත්තු වන V2ray පණිවිඩයට 'Reply' කරන්න.")
-        return
-    users_query = db.collection('users').select(["user_id"]).stream()
-    target_users = [int(doc.id) async for doc in users_query if int(doc.id) != OWNER_ID]
-    total_users = len(target_users)
-    if total_users == 0:
-        await update.message.reply_text("😕 Bot හට ලියාපදිංචි වූ කිසිදු පරිශීලකයෙකු (users) හමු නොවීය.")
-        return
-    await update.message.reply_text(f"⏳ V2ray (/send) Broadcast ආරම්භ වෙමින් පවතී...\nමුළු Users: {total_users}\nBatch Size: {BROADCAST_BATCH_SIZE}")
-    sent_count, failed_count = 0, 0
-    for i, user_id in enumerate(target_users):
-        try:
-            await replied_message.copy(chat_id=user_id)
-            sent_count += 1
-            if (i + 1) % BROADCAST_BATCH_SIZE == 0: await asyncio.sleep(1) 
-            else: await asyncio.sleep(0.05)
-        except (Forbidden, BadRequest): failed_count += 1
-        except Exception as e:
-            logger.error(f"Send (copy) failed for user {user_id}: {e}")
-            failed_count += 1
-    await update.message.reply_text(f"📣 Send සම්පූර්ණයි! (Sent: {sent_count}, Failed: {failed_count})")
-
-async def broadcast_command_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_to_send = update.message.text.split(' ', 1)
-    if len(message_to_send) < 2:
-        await update.message.reply_text("භාවිතය: /broadcast <ඔබේ text message එක>")
-        return
-    message_content = message_to_send[1]
-    users_query = db.collection('users').select(["user_id"]).stream()
-    target_users = [int(doc.id) async for doc in users_query if int(doc.id) != OWNER_ID]
-    total_users = len(target_users)
-    if total_users == 0:
-        await update.message.reply_text("😕 Bot හට ලියාපදිංචි වූ කිසිදු පරිශීලකයෙකු (users) හමු නොවීය.")
-        return
-    await update.message.reply_text(f"⏳ Text Broadcast ආරම්භ වෙමින් පවතී...\nමුළු Users: {total_users}\nBatch Size: {BROADCAST_BATCH_SIZE}")
-    sent_count, failed_count = 0, 0
-    for i, user_id in enumerate(target_users):
-        try:
-            await context.bot.send_message(chat_id=user_id, text=message_content, parse_mode=ParseMode.MARKDOWN)
-            sent_count += 1
-            if (i + 1) % BROADCAST_BATCH_SIZE == 0: await asyncio.sleep(1)
-            else: await asyncio.sleep(0.05)
-        except (Forbidden, BadRequest): failed_count += 1
-        except Exception as e:
-            logger.error(f"Broadcast (text) failed for user {user_id}: {e}")
-            failed_count += 1
-    await update.message.reply_text(f"📣 Broadcast සම්පූර්ණයි! (Sent: {sent_count}, Failed: {failed_count})")
-
-async def setfree_command_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        post_id = int(context.args[0])
-        settings_ref = db.collection('config').document('bot_settings')
-        await settings_ref.set({'free_v2ray_post_id': post_id}, merge=True)
-        await update.message.reply_text(f"✅ සාර්ථකයි!\n/free command එක සඳහා Post ID එක `{post_id}` ලෙස සකසන ලදී.")
-    except (IndexError, ValueError):
-        await update.message.reply_text("භාවිතය: /setfree <Post ID>\n\n(Post ID එක ලබා ගැනීමට, channel එකේ message එකක් මට forward කරන්න)")
-    except Exception as e:
-        logger.error(f"/setfree error: {e}")
-        await update.message.reply_text(f"⛔ දෝෂයක්! {e}")
-
-async def addcoins_command_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id_to_add = int(context.args[0])
-        amount_to_add = int(context.args[1])
-        user_ref = db.collection('users').document(str(user_id_to_add))
-        user_doc = await user_ref.get()
-        if not user_doc.exists:
-            await update.message.reply_text(f"⛔ දෝෂයක්! User ID {user_id_to_add} දත්ත ගබඩාවේ (db) නැත.")
-            return
-        await user_ref.update({"coins": firestore.Increment(amount_to_add)})
-        new_balance = user_doc.to_dict().get('coins', 0) + amount_to_add
-        await update.message.reply_text(f"✅ සාර්ථකයි!\nUser {user_id_to_add} ට Coin {amount_to_add} ක් එකතු කරන ලදී.\nනව Balance: {new_balance}")
-        
-        try:
-            user_lang = user_doc.to_dict().get('language', 'si')
-            if user_lang == 'si':
-                notify_text = f"🎉 සුභ පැතුම්!\nOwner විසින් ඔබට **Coin {amount_to_add}** ක් තෑගි දෙන ලදී!\nඔබගේ නව balance: {new_balance} Coins"
-            else:
-                notify_text = f"🎉 Congratulations!\nThe Owner sent you a gift of **{amount_to_add} Coins**!\nYour new balance: {new_balance} Coins"
-            await context.bot.send_message(user_id_to_add, notify_text)
-        except: pass
-            
-    except (IndexError, ValueError):
-        await update.message.reply_text("භාවිතය: /addcoins <User ID> <Amount>")
-    except Exception as e:
-        logger.error(f"/addcoins error: {e}")
-        await update.message.reply_text(f"⛔ දෝෂයක්! {e}")
-
-async def get_forwarded_post_id_handler_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    fwd_chat = update.message.forward_from_chat
-    if fwd_chat and fwd_chat.id == MAIN_CHANNEL_ID:
-        post_id = update.message.forward_from_message_id
-        await update.message.reply_text(
-            f"✅ **Post ID හමුවිය!**\n\nPost ID: `{post_id}`\n\nSet කිරීමට:\n`/setfree {post_id}`",
+async def post_id_finder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Channel එකෙන් forward කරන post වල ID එක ලබා දෙයි."""
+    message = update.message
+    if message.forward_from_chat and message.forward_from_chat.id == MAIN_CHANNEL_ID:
+        post_id = message.forward_from_message_id
+        await message.reply_text(
+            f"Message ID from channel found: `{post_id}`\n\n"
+            f"Use this command to set it:\n"
+            f"`/setfree {post_id}`",
             parse_mode=ParseMode.MARKDOWN
         )
     else:
-        await update.message.reply_text(f"⛔ කරුණාකර ඔබගේ **Main Channel** ({MAIN_CHANNEL_ID}) එකෙන් පමණක් message එකක් forward කරන්න.")
+        await message.reply_text("This is not a forwarded post from your Main Channel.")
 
-# Owner command wrappers
-async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await owner_only_command(update, context, send_command_logic)
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await owner_only_command(update, context, broadcast_command_logic)
-async def setfree_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await owner_only_command(update, context, setfree_command_logic)
+
 async def addcoins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await owner_only_command(update, context, addcoins_command_logic)
-async def get_forwarded_post_id_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user and update.effective_user.id == OWNER_ID:
-        await get_forwarded_post_id_handler_logic(update, context)
+    """User කෙනෙකුට manually coins දීමට."""
+    args = context.args
+    if len(args) != 2 or not args[0].isdigit() or not args[1].isdigit():
+        await update.message.reply_text("Usage: `/addcoins <user_id> <amount>`")
+        return
 
-# === Bot Startup ===
-
-async def post_init(application: Application):
+    target_user_id = int(args[0])
+    amount = int(args[1])
+    
     try:
-        bot_info = await application.bot.get_me()
-        application.bot_data['username'] = bot_info.username
-        logger.info(f"Bot @{bot_info.username} ලෙස සාර්ථකව ලොග් විය.")
-        await application.bot.send_message(chat_id=OWNER_ID, text="🤖 Bot සාර්ථකව ආරම්භ විය (Multi-Language Active)!")
+        user_data = await get_user_data(target_user_id)
+        if not user_data.get('is_registered', False):
+            await update.message.reply_text(f"Error: User ID {target_user_id} is not registered yet.")
+            return
+            
+        user_data['coins'] = user_data.get('coins', 0) + amount
+        await update_user_data(target_user_id, user_data)
+        
+        await update.message.reply_text(f"✅ Added {amount} coins to User ID {target_user_id}. New balance: {user_data['coins']} 🪙")
+        
+        # User ට දන්වයි
+        try:
+            lang = user_data.get('language', 'en')
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"🎁 Admin has added {amount} coins to your account! Your new balance is {user_data['coins']} 🪙."
+                     if lang == 'en' else
+                     f"🎁 Admin විසින් ඔබගේ ගිණුමට කාසි {amount} ක් එකතු කරන ලදී! ඔබගේ නව ශේෂය {user_data['coins']} 🪙."
+            )
+        except Exception as e:
+            logger.warning(f"User {target_user_id} ට addcoins alert එක යැවීමට නොහැකි විය: {e}")
+            
     except Exception as e:
-        logger.critical(f"Bot username ලබා ගැනීමට නොහැකි විය: {e}")
-        application.bot_data['username'] = "YOUR_BOT_USERNAME"
+        await update.message.reply_text(f"An error occurred: {e}")
+
+
+async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Support ticket එකකට පිළිතුරු (reply) යවයි."""
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Usage: `/reply <user_id> <message_text>`")
+        return
+
+    try:
+        target_user_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid User ID. Usage: `/reply <user_id> <message_text>`")
+        return
+        
+    reply_message = " ".join(args[1:])
+    
+    try:
+        target_user_data = await get_user_data(target_user_id)
+        lang = target_user_data.get('language', 'en')
+        
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=get_string('support_reply_received_user', lang).format(message=reply_message)
+        )
+        
+        await update.message.reply_text(
+            get_string('support_reply_success_admin', 'en').format(user_id=target_user_id)
+        )
+        
+    except Exception as e:
+        logger.error(f"Support reply to {target_user_id} failed: {e}")
+        await update.message.reply_text(
+            get_string('support_reply_fail_admin', 'en').format(user_id=target_user_id, error=e)
+        )
+
+
+# === Main Function (Bot එක පණ ගන්වයි) ===
 
 def main():
-    logger.info("Bot ආරම්භ වෙමින් පවතී...")
+    """Bot එක පණ ගන්වා run කරයි."""
+    
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+    except Exception as e:
+        logger.critical(f"Bot Token එකේ දෝෂයක්: {e}")
+        logger.critical("Bot Token එක 'BOT_TOKEN' variable එකේ නිවැරදිව ඇතුළත් කර ඇත්දැයි පරීක්ෂා කරන්න.")
+        return
 
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # Handlers එකතු කිරීම
+    # --- Support Conversation Handler ---
+    support_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("support", support_start, filters=~admin_filter),
+            CallbackQueryHandler(main_menu_callback, pattern="^menu_support$")
+        ],
+        states={
+            TYPING_SUPPORT_MESSAGE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_support_message)
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_support)],
+    )
+    
+    # --- User Handlers ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("register", register_command))
+    application.add_handler(CallbackQueryHandler(language_button_handler, pattern="^lang_"))
+    application.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join_"))
+    
+    # Main Menu Commands & Callbacks
     application.add_handler(CommandHandler("myaccount", myaccount_command))
     application.add_handler(CommandHandler("shop", shop_command))
     application.add_handler(CommandHandler("free", free_command))
+    application.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^menu_"))
+    application.add_handler(CallbackQueryHandler(back_to_menu_callback, pattern="^back_to_menu$"))
     
-    application.add_handler(CallbackQueryHandler(language_button_handler, pattern="^lang_"))
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^buy_"))
+    # Shop "Buy" buttons
+    application.add_handler(CallbackQueryHandler(shop_button_handler, pattern="^buy_"))
     
-    # Owner (Admin) Commands
-    application.add_handler(CommandHandler("broadcast", broadcast_command))
-    application.add_handler(CommandHandler("send", send_command))
-    application.add_handler(CommandHandler("setfree", setfree_command))
-    application.add_handler(CommandHandler("addcoins", addcoins_command))
+    # Support Handler
+    application.add_handler(support_conv_handler)
     
+    
+    # --- Admin Handlers (Owner ට පමණි) ---
+    application.add_handler(CommandHandler("broadcast", broadcast_command, filters=admin_filter))
+    application.add_handler(CommandHandler("send", send_command, filters=admin_filter))
+    application.add_handler(CommandHandler("setfree", setfree_command, filters=admin_filter))
+    application.add_handler(CommandHandler("addcoins", addcoins_command, filters=admin_filter))
+    application.add_handler(CommandHandler("reply", reply_command, filters=admin_filter))
+    
+    # Admin Post ID Finder (Owner ගෙන් එන forward වලට)
     application.add_handler(MessageHandler(
-        filters.FORWARDED & filters.User(user_id=OWNER_ID), 
-        get_forwarded_post_id_handler
+        filters.FORWARDED & filters.Chat(OWNER_ID),
+        post_id_finder
     ))
     
-    application.post_init = post_init
 
-    logger.info("Bot polling ආරම්භ කරයි...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Bot Run
+    logger.info("Bot is starting to poll...")
+    application.run_polling()
+
 
 if __name__ == "__main__":
     main()
